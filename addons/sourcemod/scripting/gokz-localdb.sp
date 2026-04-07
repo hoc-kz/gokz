@@ -74,9 +74,9 @@ public void OnAllPluginsLoaded()
 	char auth[32];
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (IsClientAuthorized(client) && GetClientAuthId(client, AuthId_Engine, auth, sizeof(auth)))
+		if (IsClientAuthorized(client))
 		{
-			OnClientAuthorized(client, auth);
+			DB_SetupClient(client);
 		}
 	}
 }
@@ -110,13 +110,10 @@ public void OnMapEnd()
 	gB_MapSetUp = false;
 }
 
-public void OnClientAuthorized(int client, const char[] auth)
-{
-	DB_SetupClient(client);
-}
-
 public void OnClientPostAdminCheck(int client)
 {
+	DB_SetupClient(client);
+
 	// We need this after OnClientPutInServer cause that's where the VBs get reset
 	gB_ClientPostAdminChecked[client] = true;
 	

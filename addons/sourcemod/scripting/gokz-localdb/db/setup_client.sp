@@ -31,6 +31,8 @@ void DB_SetupClient(int client)
 		LogMessage("Couldn't get country of %L (%s).", client, clientIP);
 		country = "Unknown";
 	}
+
+	bool isVIP = CheckCommandAccess(client, "gokz_flag_vip", ADMFLAG_CUSTOM1);
 	
 	DataPack data = new DataPack();
 	data.WriteCell(GetClientUserId(client));
@@ -44,16 +46,16 @@ void DB_SetupClient(int client)
 		case DatabaseType_SQLite:
 		{
 			// UPDATE OR IGNORE
-			FormatEx(query, sizeof(query), sqlite_players_update, nameEscaped, country, clientIP, steamID);
+			FormatEx(query, sizeof(query), sqlite_players_update, nameEscaped, country, clientIP, isVIP, steamID);
 			txn.AddQuery(query);
 			// INSERT OR IGNORE
-			FormatEx(query, sizeof(query), sqlite_players_insert, nameEscaped, country, clientIP, steamID);
+			FormatEx(query, sizeof(query), sqlite_players_insert, nameEscaped, country, clientIP, isVIP, steamID);
 			txn.AddQuery(query);
 		}
 		case DatabaseType_MySQL:
 		{
 			// INSERT ... ON DUPLICATE KEY ...
-			FormatEx(query, sizeof(query), mysql_players_upsert, nameEscaped, country, clientIP, steamID);
+			FormatEx(query, sizeof(query), mysql_players_upsert, nameEscaped, country, clientIP, isVIP, steamID);
 			txn.AddQuery(query);
 		}
 	}

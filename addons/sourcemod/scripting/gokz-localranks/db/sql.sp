@@ -336,7 +336,8 @@ SELECT j.JumpID, p.SteamID32, p.Alias, j.Block, j.Distance, j.Strafes, j.Sync, j
     INNER JOIN \
         Players p ON \
             p.SteamID32=j.SteamID32 AND \
-			p.Cheater = 0 \
+			p.Cheater = 0 AND \
+            p.IsVIP = 1 \
 	INNER JOIN \
 		( \
 			SELECT j.SteamID32, j.JumpType, j.Mode, j.IsBlockJump, MAX(j.Distance) BestDistance \

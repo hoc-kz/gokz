@@ -41,7 +41,7 @@ static void GenerateNavFile()
 	char mapPath[PLATFORM_MAX_PATH];
 	GetCurrentMap(mapPath, sizeof(mapPath));
 
-	char[] navFilePath = new char[PLATFORM_MAX_PATH];
+	char navFilePath[PLATFORM_MAX_PATH];
 	FormatEx(navFilePath, PLATFORM_MAX_PATH, "maps/%s.nav", mapPath);
 
 	if (!FileExists(GOKZ_NAV_FILE))

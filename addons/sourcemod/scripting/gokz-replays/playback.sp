@@ -12,7 +12,6 @@ static int preAndPostRunTickCount;
 
 static int playbackTick[RP_MAX_BOTS];
 static ArrayList playbackTickData[RP_MAX_BOTS];
-static ArrayList playbackNetStats[RP_MAX_BOTS];
 static ArrayList playbackWeapons[RP_MAX_BOTS];
 
 // When tickStreamActive[bot] is true, ticks are not preloaded into playbackTickData[bot],
@@ -314,10 +313,6 @@ void OnClientDisconnect_Playback(int client)
 		{
 			Tick_Free(bot);
 			botDataLoaded[bot] = false;
-		}
-		if (playbackNetStats[bot] != null)
-		{
-			playbackNetStats[bot].Clear();
 		}
 		if (playbackWeapons[bot] != null)
 		{
@@ -833,15 +828,7 @@ static bool ReadV3SectionStream(File file, int bot, int tickCount)
 			}
 			case RP_SECTION_NETSTATS:
 			{
-				if (codec == RP_CODEC_RAW)
-				{
-					ReadCache_SetFile(file, length);
-					ReadNetStatsSection(bot);
-				}
-				else
-				{
-					LogError("Unknown codec %d for NETSTATS section, skipping.", codec);
-				}
+				// Netstats are written by the recorder for external tooling but are not consumed during playback.
 			}
 			case RP_SECTION_WEAPONS:
 			{
@@ -861,50 +848,6 @@ static bool ReadV3SectionStream(File file, int bot, int tickCount)
 		// Always advance to end of payload to handle unknown tags, unknown codecs,
 		// the v2 tick reader's early-break HACK, and any bytes the read cache pulled past the actual consumer position.
 		file.Seek(payloadStart + length, SEEK_SET);
-	}
-}
-
-static void ReadNetStatsSection(int bot)
-{
-	if (playbackNetStats[bot] == null)
-	{
-		playbackNetStats[bot] = new ArrayList(sizeof(ReplayNetStats));
-	}
-	else
-	{
-		playbackNetStats[bot].Clear();
-	}
-
-	int n;
-	if (!ReadCache_ReadInt32(n) || n < 0)
-	{
-		return;
-	}
-
-	playbackNetStats[bot].Resize(n);
-
-	ReplayNetStats netStats;
-	for (int i = 0; i < n; i++)
-	{
-		int latencyMs;
-		int lossIn, lossOut;
-		int chokeIn, chokeOut;
-		if (!ReadCache_ReadInt16(latencyMs)
-			|| !ReadCache_ReadInt16(lossIn)
-			|| !ReadCache_ReadInt16(lossOut)
-			|| !ReadCache_ReadInt16(chokeIn)
-			|| !ReadCache_ReadInt16(chokeOut))
-		{
-			LogError("Truncated NETSTATS at entry %d/%d.", i, n);
-			playbackNetStats[bot].Resize(i);
-			return;
-		}
-		netStats.latencyMs = latencyMs;
-		netStats.lossInX10k = lossIn;
-		netStats.lossOutX10k = lossOut;
-		netStats.chokeInX10k = chokeIn;
-		netStats.chokeOutX10k = chokeOut;
-		playbackNetStats[bot].SetArray(i, netStats);
 	}
 }
 
@@ -1093,17 +1036,6 @@ static bool ReadCache_ReadByte(int &out)
 static bool ReadCache_ReadInt8(int &v)
 {
 	return ReadCache_ReadByte(v);
-}
-
-static bool ReadCache_ReadInt16(int &v)
-{
-	int b0, b1;
-	if (!ReadCache_ReadByte(b0) || !ReadCache_ReadByte(b1))
-	{
-		return false;
-	}
-	v = b0 | (b1 << 8);
-	return true;
 }
 
 static bool ReadCache_ReadInt32(int &v)

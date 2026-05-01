@@ -14,18 +14,17 @@ static int playbackTick[RP_MAX_BOTS];
 static ArrayList playbackTickData[RP_MAX_BOTS];
 static ArrayList playbackWeapons[RP_MAX_BOTS];
 
-// When tickStreamActive[bot] is true, ticks are not preloaded into playbackTickData[bot],
-// they are decoded on demand from the file using a small sliding window backed by a keyframe index.
-static bool tickStreamActive[RP_MAX_BOTS];
-static File tickStreamFile[RP_MAX_BOTS];
-static int tickStreamPayloadStart[RP_MAX_BOTS];
-static int tickStreamTickCount[RP_MAX_BOTS];
-static ArrayList tickStreamKeyframes[RP_MAX_BOTS]; // entries: int[2] = {tickIndex, payloadOffset}
-static ArrayList tickStreamWindow[RP_MAX_BOTS];
-static int tickStreamWindowStart[RP_MAX_BOTS];
-static int tickStreamCursor[RP_MAX_BOTS];
-static bool tickStreamFileAtCursor[RP_MAX_BOTS];
-static any tickStreamAccum[RP_MAX_BOTS][RP_V2_TICK_DATA_BLOCKSIZE];
+// When tsActive[bot] is true, ticks are not preloaded into playbackTickData[bot], they are decoded on demand from the file. 
+// The ring caches the last TICK_RING_SIZE decoded ticks (indexed by tick % TICK_RING_SIZE) so reverse-by-1 reads are free.
+static bool tsActive[RP_MAX_BOTS];
+static File tsFile[RP_MAX_BOTS];
+static int tsPayloadStart[RP_MAX_BOTS];
+static int tsTickCount[RP_MAX_BOTS];
+static ArrayList tsKeyframes[RP_MAX_BOTS]; // entries: int[2] = {tickIndex, payloadOffset}
+static ArrayList tsRing[RP_MAX_BOTS];      // pre-sized to TICK_RING_SIZE, indexed by tick % TICK_RING_SIZE
+static int tsRingNextTick[RP_MAX_BOTS];    // next tick a decode will produce, valid range = [max(0, this - TICK_RING_SIZE), this)
+static bool tsFileAtNextTick[RP_MAX_BOTS]; // file pointer is positioned to read tick == tsRingNextTick
+static any tsAccum[RP_MAX_BOTS][RP_V2_TICK_DATA_BLOCKSIZE];
 static bool inBreather[RP_MAX_BOTS];
 static float breatherStartTime[RP_MAX_BOTS];
 
@@ -739,8 +738,8 @@ static bool LoadFormatVersion2Or3Replay(File file, int client, int bot, int form
 	playbackTick[bot] = 0;
 	botDataLoaded[bot] = true;
 
-	// streaming keeps the file handle open via tickStreamFile[bot].
-	if (!tickStreamActive[bot])
+	// streaming keeps the file handle open via tsFile[bot].
+	if (!tsActive[bot])
 	{
 		delete file;
 	}
@@ -1088,14 +1087,12 @@ static void ReadCache_ReadString(char[] buf, int maxLen, int byteCount, int copy
 
 // =====[ TICK STREAM ]=====
 //
-// At load time we read only the keyframe index trailer
-// Tick data is decoded into a small sliding window around the current playback tick.
-// On miss we either decode forward from the cursor (cheap, sequential play)
-// or seek to the largest keyframe with tickIndex <= target (random skip).
+// At load time we read only the keyframe index trailer.
+// Tick data is decoded on demand into a fixed-size ring buffer indexed by tick % TICK_RING_SIZE.
+// Forward play is sequential decode; rewinds within the ring are free; larger jumps reseek to the
+// nearest preceding keyframe (full snapshot) and decode forward.
 
-#define TICK_WINDOW_BEHIND_TICKS 64
-#define TICK_WINDOW_AHEAD_TICKS 192
-#define TICK_WINDOW_MAX_TICKS 384
+#define TICK_RING_SIZE 128
 
 // Read the keyframe trailer at the end of the TICKS section payload.
 // Layout: <ticks bytes...> { u32 tickIndex, u32 fileOffset } * count, u32 count.
@@ -1157,61 +1154,60 @@ static bool TickStream_Init(int bot, File file, int payloadStart, int payloadLen
 		return false;
 	}
 
-	tickStreamActive[bot] = true;
-	tickStreamFile[bot] = file;
-	tickStreamPayloadStart[bot] = payloadStart;
-	tickStreamTickCount[bot] = tickCount;
-	tickStreamKeyframes[bot] = keyframes;
-	tickStreamWindow[bot] = new ArrayList(sizeof(ReplayTickData));
-	tickStreamWindowStart[bot] = 0;
-	tickStreamCursor[bot] = 0;
-	// ReadV3SectionStream owns the file position right after Init returns and will
-	// seek past this section to read the next one, so the first decode must reseek.
-	tickStreamFileAtCursor[bot] = false;
+	tsActive[bot] = true;
+	tsFile[bot] = file;
+	tsPayloadStart[bot] = payloadStart;
+	tsTickCount[bot] = tickCount;
+	tsKeyframes[bot] = keyframes;
+	tsRing[bot] = new ArrayList(sizeof(ReplayTickData));
+	tsRing[bot].Resize(TICK_RING_SIZE);
+	tsRingNextTick[bot] = 0;
+	// Caller (ReadV3SectionStream) seeks past this section after Init returns,
+	// so the first decode must reseek to a keyframe.
+	tsFileAtNextTick[bot] = false;
 	for (int i = 0; i < RP_V2_TICK_DATA_BLOCKSIZE; i++)
 	{
-		tickStreamAccum[bot][i] = 0;
+		tsAccum[bot][i] = 0;
 	}
 	return true;
 }
 
 static void TickStream_Free(int bot)
 {
-	if (!tickStreamActive[bot])
+	if (!tsActive[bot])
 	{
 		return;
 	}
-	if (tickStreamFile[bot] != null)
+	if (tsFile[bot] != null)
 	{
-		delete tickStreamFile[bot];
+		delete tsFile[bot];
 	}
-	if (tickStreamKeyframes[bot] != null)
+	if (tsKeyframes[bot] != null)
 	{
-		delete tickStreamKeyframes[bot];
+		delete tsKeyframes[bot];
 	}
-	if (tickStreamWindow[bot] != null)
+	if (tsRing[bot] != null)
 	{
-		delete tickStreamWindow[bot];
+		delete tsRing[bot];
 	}
-	tickStreamActive[bot] = false;
-	tickStreamWindowStart[bot] = 0;
-	tickStreamCursor[bot] = 0;
-	tickStreamFileAtCursor[bot] = false;
-	tickStreamTickCount[bot] = 0;
-	tickStreamPayloadStart[bot] = 0;
+	tsActive[bot] = false;
+	tsRingNextTick[bot] = 0;
+	tsFileAtNextTick[bot] = false;
+	tsTickCount[bot] = 0;
+	tsPayloadStart[bot] = 0;
 }
 
-// Decode one tick from current file position into accumulator and append to window.
-// Caller must ensure file is positioned correctly and cursor < tickCount.
+// Decode one tick from current file position into the accumulator,
+// then store it in the ring at tsRingNextTick % TICK_RING_SIZE and advance.
 static bool TickStream_DecodeOne(int bot)
 {
-	File file = tickStreamFile[bot];
+	File file = tsFile[bot];
 	int deltaFlags;
 	if (!file.ReadInt32(deltaFlags))
 	{
 		return false;
 	}
-	tickStreamAccum[bot][RPDELTA_DELTAFLAGS] = deltaFlags;
+	tsAccum[bot][RPDELTA_DELTAFLAGS] = deltaFlags;
 	for (int i = 1; i < RP_V2_TICK_DATA_BLOCKSIZE; i++)
 	{
 		if (deltaFlags & (1 << i))
@@ -1221,18 +1217,18 @@ static bool TickStream_DecodeOne(int bot)
 			{
 				return false;
 			}
-			tickStreamAccum[bot][i] = v;
+			tsAccum[bot][i] = v;
 		}
 	}
-	tickStreamWindow[bot].PushArray(tickStreamAccum[bot], sizeof(tickStreamAccum[]));
-	tickStreamCursor[bot]++;
+	tsRing[bot].SetArray(tsRingNextTick[bot] % TICK_RING_SIZE, tsAccum[bot], sizeof(tsAccum[]));
+	tsRingNextTick[bot]++;
 	return true;
 }
 
 // Find largest keyframe with tickIndex <= target. Returns keyframe array index (>= 0).
 static int TickStream_FindKeyframe(int bot, int targetTick)
 {
-	ArrayList keyframes = tickStreamKeyframes[bot];
+	ArrayList keyframes = tsKeyframes[bot];
 	int lo = 0;
 	int hi = keyframes.Length - 1;
 	int best = 0;
@@ -1254,98 +1250,55 @@ static int TickStream_FindKeyframe(int bot, int targetTick)
 	return best;
 }
 
-// Trim the front of the window so it holds at most TICK_WINDOW_MAX_TICKS entries
-// and at most TICK_WINDOW_BEHIND_TICKS behind the access tick.
-static void TickStream_TrimFront(int bot, int accessTick)
+// Position the file and decode state at the keyframe <= target. Resets accumulator (keyframes are full snapshots).
+static void TickStream_SeekToKeyframeFor(int bot, int target)
 {
-	ArrayList window = tickStreamWindow[bot];
-	int targetStart = accessTick - TICK_WINDOW_BEHIND_TICKS;
-	if (targetStart < 0)
+	int kfIdx = TickStream_FindKeyframe(bot, target);
+	int entry[2];
+	tsKeyframes[bot].GetArray(kfIdx, entry, sizeof(entry));
+	tsFile[bot].Seek(tsPayloadStart[bot] + entry[1], SEEK_SET);
+	for (int i = 0; i < RP_V2_TICK_DATA_BLOCKSIZE; i++)
 	{
-		targetStart = 0;
+		tsAccum[bot][i] = 0;
 	}
-	// Also enforce hard cap.
-	int hardStart = tickStreamWindowStart[bot] + window.Length - TICK_WINDOW_MAX_TICKS;
-	if (hardStart > targetStart)
-	{
-		targetStart = hardStart;
-	}
-	int dropCount = targetStart - tickStreamWindowStart[bot];
-	if (dropCount <= 0)
-	{
-		return;
-	}
-	if (dropCount >= window.Length)
-	{
-		window.Clear();
-		tickStreamWindowStart[bot] = targetStart;
-		return;
-	}
-	for (int i = 0; i < dropCount; i++)
-	{
-		window.Erase(0);
-	}
-	tickStreamWindowStart[bot] = targetStart;
+	tsRingNextTick[bot] = entry[0];
+	tsFileAtNextTick[bot] = true;
 }
 
-// Ensure tickIdx is materialized in the window. Returns relative index (>= 0) on success or -1 on failure (out of range, file error)
-static int TickStream_Materialize(int bot, int tickIdx)
+// Ensure tickIdx is decoded into the ring. Returns true on success.
+static bool TickStream_Materialize(int bot, int tickIdx)
 {
-	if (tickIdx < 0 || tickIdx >= tickStreamTickCount[bot])
+	if (tickIdx < 0 || tickIdx >= tsTickCount[bot])
 	{
-		return -1;
+		return false;
 	}
 
-	ArrayList window = tickStreamWindow[bot];
-	int rel = tickIdx - tickStreamWindowStart[bot];
-
-	// Already in window?
-	if (rel >= 0 && rel < window.Length)
+	int next = tsRingNextTick[bot];
+	int ringFloor = next > TICK_RING_SIZE ? next - TICK_RING_SIZE : 0;
+	if (tickIdx < next && tickIdx >= ringFloor)
 	{
-		return rel;
+		return true;
 	}
 
-	int cursor = tickStreamCursor[bot];
-
-	bool canExtend = tickStreamFileAtCursor[bot]
-		&& tickIdx >= cursor
-		&& tickIdx - cursor < TICK_WINDOW_AHEAD_TICKS;
-	if (!canExtend)
+	// Reseek if file is desynced, going backward, or jumping forward across a keyframe boundary.
+	bool needSeek = !tsFileAtNextTick[bot]
+		|| tickIdx < next
+		|| tickIdx - next >= RP_TICKS_KEYFRAME_INTERVAL;
+	if (needSeek)
 	{
-		// Backward or far jump (or first decode after load): seek to keyframe.
-		int kfIdx = TickStream_FindKeyframe(bot, tickIdx);
-		int entry[2];
-		tickStreamKeyframes[bot].GetArray(kfIdx, entry, sizeof(entry));
-		tickStreamFile[bot].Seek(tickStreamPayloadStart[bot] + entry[1], SEEK_SET);
-		tickStreamFileAtCursor[bot] = true;
-		for (int i = 0; i < RP_V2_TICK_DATA_BLOCKSIZE; i++)
-		{
-			tickStreamAccum[bot][i] = 0;
-		}
-		window.Clear();
-		tickStreamWindowStart[bot] = entry[0];
-		tickStreamCursor[bot] = entry[0];
-		cursor = entry[0];
+		TickStream_SeekToKeyframeFor(bot, tickIdx);
 	}
 
-	// Decode forward up to and including tickIdx.
-	int decodeUntil = tickIdx + 1;
-	if (decodeUntil > tickStreamTickCount[bot])
-	{
-		decodeUntil = tickStreamTickCount[bot];
-	}
-	while (tickStreamCursor[bot] < decodeUntil)
+	while (tsRingNextTick[bot] <= tickIdx)
 	{
 		if (!TickStream_DecodeOne(bot))
 		{
-			LogError("TickStream decode failed at tick %d (target %d).", tickStreamCursor[bot], tickIdx);
-			tickStreamFileAtCursor[bot] = false;
-			return -1;
+			LogError("TickStream decode failed at tick %d (target %d).", tsRingNextTick[bot], tickIdx);
+			tsFileAtNextTick[bot] = false;
+			return false;
 		}
 	}
-
-	TickStream_TrimFront(bot, tickIdx);
-	return tickIdx - tickStreamWindowStart[bot];
+	return true;
 }
 
 // =====[ TICK ACCESSOR DISPATCHERS ]=====
@@ -1356,21 +1309,21 @@ static int TickStream_Materialize(int bot, int tickIdx)
 
 static int Tick_Length(int bot)
 {
-	if (tickStreamActive[bot])
+	if (tsActive[bot])
 	{
-		return tickStreamTickCount[bot];
+		return tsTickCount[bot];
 	}
 	return playbackTickData[bot] != null ? playbackTickData[bot].Length : 0;
 }
 
 static bool Tick_IsLoaded(int bot)
 {
-	return tickStreamActive[bot] || playbackTickData[bot] != null;
+	return tsActive[bot] || playbackTickData[bot] != null;
 }
 
 static void Tick_Free(int bot)
 {
-	if (tickStreamActive[bot])
+	if (tsActive[bot])
 	{
 		TickStream_Free(bot);
 	}
@@ -1382,16 +1335,15 @@ static void Tick_Free(int bot)
 
 static void Tick_GetArray(int bot, int tickIdx, ReplayTickData out)
 {
-	if (tickStreamActive[bot])
+	if (tsActive[bot])
 	{
-		int rel = TickStream_Materialize(bot, tickIdx);
-		if (rel < 0)
+		if (!TickStream_Materialize(bot, tickIdx))
 		{
 			ReplayTickData blank;
 			out = blank;
 			return;
 		}
-		tickStreamWindow[bot].GetArray(rel, out);
+		tsRing[bot].GetArray(tickIdx % TICK_RING_SIZE, out);
 		return;
 	}
 	playbackTickData[bot].GetArray(tickIdx, out);

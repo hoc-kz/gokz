@@ -736,7 +736,7 @@ static bool LoadFormatVersion2Or3Replay(File file, int client, int bot, int form
 	}
 	else
 	{
-		// Legacy v2: tick stream runs to EOF. -1 = no cap, refill until file ends.
+		// v2: tick stream runs to EOF. -1 = no cap, refill until file ends.
 		ReadCache_SetFile(file, -1);
 		ReadTickStreamV2Format(bot, tickCount);
 	}
@@ -859,8 +859,7 @@ static bool ReadV3SectionStream(File file, int bot, int tickCount)
 		}
 
 		// Always advance to end of payload to handle unknown tags, unknown codecs,
-		// the v2 tick reader's early-break HACK, and any bytes the read cache pulled
-		// past the actual consumer position.
+		// the v2 tick reader's early-break HACK, and any bytes the read cache pulled past the actual consumer position.
 		file.Seek(payloadStart + length, SEEK_SET);
 	}
 }
@@ -1041,8 +1040,7 @@ static bool ReadCache_Refill()
 		}
 	}
 
-	// Trailing 1-3 bytes (only at the last refill of a section whose length isn't a multiple of 4,
-	// or never if cap was already a cell-multiple).
+	// Trailing 1-3 bytes (only at the last refill of a section whose length isn't a multiple of 4, or never if cap was already a cell-multiple).
 	// Skip if file came up short on cells, it's exhausted.
 	if (gotCells == wantCells)
 	{
@@ -1358,8 +1356,7 @@ static void TickStream_TrimFront(int bot, int accessTick)
 	tickStreamWindowStart[bot] = targetStart;
 }
 
-// Ensure tickIdx is materialized in the window. Returns relative index (>= 0) on success
-// or -1 on failure (out of range, file error).
+// Ensure tickIdx is materialized in the window. Returns relative index (>= 0) on success or -1 on failure (out of range, file error)
 static int TickStream_Materialize(int bot, int tickIdx)
 {
 	if (tickIdx < 0 || tickIdx >= tickStreamTickCount[bot])

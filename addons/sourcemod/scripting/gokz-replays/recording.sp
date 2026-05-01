@@ -32,10 +32,8 @@ static ArrayList runningJumpstatTimers[MAXPLAYERS + 1];
 // in-memory ArrayLists. Two slots per client (ping-pong) so a new run can begin
 // recording while the previous run's post-run breather is still flushing.
 #define REC_NUM_SLOTS 2
-static File recTicksFile[MAXPLAYERS + 1][REC_NUM_SLOTS];
-static File recNetStatsFile[MAXPLAYERS + 1][REC_NUM_SLOTS];
-static int recTickCount[MAXPLAYERS + 1][REC_NUM_SLOTS];
-static int recNetStatsCount[MAXPLAYERS + 1][REC_NUM_SLOTS];
+static File recSlotFile[MAXPLAYERS + 1][REC_NUM_SLOTS];
+static int recRecordCount[MAXPLAYERS + 1][REC_NUM_SLOTS];
 static int runSlot[MAXPLAYERS + 1];
 static int postRunSlot[MAXPLAYERS + 1];
 
@@ -143,19 +141,17 @@ void OnPlayerRunCmdPost_Recording(int client, int buttons, int tickCount, const 
 	if (isRecordingRun[client])
 	{
 		int slot = runSlot[client];
-		if (recTickCount[client][slot] < RP_MAX_DURATION)
+		if (recRecordCount[client][slot] < RP_MAX_DURATION)
 		{
-			RecAppendTick(client, slot, tickData);
-			RecAppendNetStats(client, slot, netStats);
+			RecAppendRecord(client, slot, tickData, netStats);
 		}
 	}
 	if (postRunRecording[client])
 	{
 		int slot = postRunSlot[client];
-		if (recTickCount[client][slot] < RP_MAX_DURATION)
+		if (recRecordCount[client][slot] < RP_MAX_DURATION)
 		{
-			RecAppendTick(client, slot, tickData);
-			RecAppendNetStats(client, slot, netStats);
+			RecAppendRecord(client, slot, tickData, netStats);
 		}
 	}
 	
@@ -224,8 +220,8 @@ void GOKZ_OnTimerEnd_Recording(int client, int course, float time, int teleports
 	isRecordingRun[client] = false;
 	postRunRecording[client] = true;
 
-	// Hand the slot we were appending to off to post-run, then truncate the
-	// other slot so the next run can begin recording immediately.
+	// Hand the slot we were appending to off to post-run,
+	//  then truncate the other slot so the next run can begin recording immediately.
 	postRunSlot[client] = runSlot[client];
 	runSlot[client] = (runSlot[client] + 1) % REC_NUM_SLOTS;
 	RecTruncateSlot(client, runSlot[client]);
@@ -402,8 +398,7 @@ static void ClearClientRecordingState(int client)
 	postRunSlot[client] = 1;
 	for (int slot = 0; slot < REC_NUM_SLOTS; slot++)
 	{
-		recTickCount[client][slot] = 0;
-		recNetStatsCount[client][slot] = 0;
+		recRecordCount[client][slot] = 0;
 	}
 	if (!IsClientConnected(client) || IsFakeClient(client))
 	{
@@ -428,9 +423,8 @@ static void StartRunRecording(int client)
 	DiscardRecording(client);
 	ResumeRecording(client);
 	
-	// Pre-fill the run slot's tick stream with the pre-run breather window.
-	// Note: only ticks are pre-filled; netStats does not get the breather padding,
-	// so the netStats stream lags the tick stream by preAndPostRunTickCount.
+	// Pre-fill the run slot with the pre-run breather window from the rolling
+	// recent-data buffers (ticks and netstats are kept in lockstep).
 	int slot = runSlot[client];
 	int index;
 	if (recordedRecentData[client].Length < preAndPostRunTickCount)
@@ -444,16 +438,17 @@ static void StartRunRecording(int client)
 	for (int i = 0; i < preAndPostRunTickCount; i++)
 	{
 		ReplayTickData tickData;
+		ReplayNetStats netStats;
+		int readIndex = index < 0 ? 0 : index;
+		recordedRecentData[client].GetArray(readIndex, tickData);
+		recordedRecentNetStats[client].GetArray(readIndex, netStats);
+		RecAppendRecord(client, slot, tickData, netStats);
 		if (index < 0)
 		{
-			recordedRecentData[client].GetArray(0, tickData);
-			RecAppendTick(client, slot, tickData);
 			index += 1;
 		}
 		else
 		{
-			recordedRecentData[client].GetArray(index, tickData);
-			RecAppendTick(client, slot, tickData);
 			index = RecordingIndexAdd(client, -preAndPostRunTickCount + i + 1);
 		}
 	}
@@ -480,7 +475,7 @@ static bool SaveRecordingOfRun(int client, int mode, int style, int course, floa
 
 	// Create and fill General Header
 	GeneralReplayHeader generalHeader;
-	FillGeneralHeader(generalHeader, client, ReplayType_Run, mode, style, recTickCount[client][slot]);
+	FillGeneralHeader(generalHeader, client, ReplayType_Run, mode, style, recRecordCount[client][slot]);
 
 	// Create and fill Run Header
 	RunReplayHeader runHeader;
@@ -769,16 +764,22 @@ static void WriteNetStatsPayload(int client, int replayType, int airtime)
 		case ReplayType_Run:
 		{
 			int slot = postRunSlot[client];
-			int n = recNetStatsCount[client][slot];
+			int n = recRecordCount[client][slot];
 			WriteCache_WriteInt32(n);
 			if (n > 0)
 			{
-				File nf = recNetStatsFile[client][slot];
-				nf.Flush();
-				nf.Seek(0, SEEK_SET);
+				File sf = recSlotFile[client][slot];
+				sf.Flush();
+				sf.Seek(0, SEEK_SET);
+				any record[RP_V2_TICK_DATA_BLOCKSIZE + sizeof(ReplayNetStats)];
 				for (int i = 0; i < n; i++)
 				{
-					nf.Read(netStats, sizeof(ReplayNetStats), 4);
+					sf.Read(record, sizeof(record), 4);
+					netStats.latencyMs    = record[RP_V2_TICK_DATA_BLOCKSIZE + 0];
+					netStats.lossInX10k   = record[RP_V2_TICK_DATA_BLOCKSIZE + 1];
+					netStats.lossOutX10k  = record[RP_V2_TICK_DATA_BLOCKSIZE + 2];
+					netStats.chokeInX10k  = record[RP_V2_TICK_DATA_BLOCKSIZE + 3];
+					netStats.chokeOutX10k = record[RP_V2_TICK_DATA_BLOCKSIZE + 4];
 					WriteNetStatsEntry(netStats);
 				}
 			}
@@ -872,9 +873,6 @@ static void CaptureWeapons(int client, ArrayList weapons)
 			GetEntPropString(ent, Prop_Send, "m_szCustomName", entry.nametag, sizeof(ReplayWeaponEntry::nametag));
 		}
 
-		// Stickers (m_Item is a CEconItemView; sticker arrays are addressed by
-		// "m_Item.m_Item.m_AttributeList.m_Attributes" in modern CS:GO.
-		// We just query the netprops if they exist so unsupported builds skip silently.)
 		for (int s = 0; s < RP_MAX_WEAPON_STICKERS; s++)
 		{
 			entry.stickerKit[s] = 0;
@@ -925,9 +923,8 @@ static void WriteTickData(File file, int client, int replayType, int airtime = 0
 	// Do NOT use file.Write functions here or write cache will write out of order!!!
 	WriteCache_SetFile(file);
 
-	// Keyframes (every Nth tick) force isFirstTick=true so the playback decoder can
-	// resync without replaying tick 0..N-1. We append a (tickIndex, payloadOffset)
-	// trailer at the end of the section so loaders can build the index in one pass.
+	// Keyframes (every Nth tick) force isFirstTick=true so the playback decoder can resync without replaying tick 0..N-1.
+	// We append a (tickIndex, payloadOffset) trailer at the end of the section so loaders can build the index in one pass.
 	ArrayList keyframes = new ArrayList(2);
 
 	any tickData[2][RP_V2_TICK_DATA_BLOCKSIZE];
@@ -937,13 +934,14 @@ static void WriteTickData(File file, int client, int replayType, int airtime = 0
 		case ReplayType_Run:
 		{
 			int slot = postRunSlot[client];
-			int replayLength = recTickCount[client][slot];
-			File tf = recTicksFile[client][slot];
+			int replayLength = recRecordCount[client][slot];
+			File sf = recSlotFile[client][slot];
 			if (replayLength > 0)
 			{
-				tf.Flush();
-				tf.Seek(0, SEEK_SET);
+				sf.Flush();
+				sf.Seek(0, SEEK_SET);
 			}
+			any record[RP_V2_TICK_DATA_BLOCKSIZE + sizeof(ReplayNetStats)];
 			for (int i = 0; i < replayLength; i++)
 			{
 				bool isKeyframe = (i % RP_TICKS_KEYFRAME_INTERVAL) == 0;
@@ -954,7 +952,11 @@ static void WriteTickData(File file, int client, int replayType, int airtime = 0
 					entry[1] = WriteCache_BytesWritten();
 					keyframes.PushArray(entry, sizeof(entry));
 				}
-				tf.Read(tickData[currentTickData], RP_V2_TICK_DATA_BLOCKSIZE, 4);
+				sf.Read(record, sizeof(record), 4);
+				for (int j = 0; j < RP_V2_TICK_DATA_BLOCKSIZE; j++)
+				{
+					tickData[currentTickData][j] = record[j];
+				}
 				WriteTickDataThroughWriteCache(isKeyframe, tickData[currentTickData], tickData[currentTickData ^ 1]);
 				currentTickData ^= 1;
 			}
@@ -1248,82 +1250,52 @@ static void RemoveFromRunningTimers(int client, Handle timerToRemove)
 
 // =====[ RECORDING SLOT TEMP FILES ]=====
 //
-// Each client owns REC_NUM_SLOTS pairs of temp files (one for ticks, one for
-// netstats) under RP_DIRECTORY_TEMP. Files are written sequentially during
-// recording and rewound + read sequentially at Save time. Tick and netstats
-// counts are tracked independently because the tick stream includes pre/post
-// breather padding while netstats does not.
+// Each client owns REC_NUM_SLOTS temp files under RP_DIRECTORY_TEMP.
+// Each file holds packed (tick, netstats) records of size (RP_V2_TICK_DATA_BLOCKSIZE + sizeof(ReplayNetStats)) cells.
+// Records are written sequentially during recording and rewound + read sequentially at Save time.
 
-static void RecBuildPath(int client, int slot, bool isNetStats, char[] buffer, int maxlen)
+static void RecBuildPath(int client, int slot, char[] buffer, int maxlen)
 {
-	BuildPath(Path_SM, buffer, maxlen, "%s/c%d_s%d_%s.bin",
-		RP_DIRECTORY_TEMP, client, slot, isNetStats ? "n" : "t");
+	BuildPath(Path_SM, buffer, maxlen, "%s/c%d_s%d.bin", RP_DIRECTORY_TEMP, client, slot);
 }
 
 static void RecCloseSlot(int client, int slot)
 {
-	if (recTicksFile[client][slot] != null)
+	if (recSlotFile[client][slot] != null)
 	{
-		delete recTicksFile[client][slot];
+		delete recSlotFile[client][slot];
 	}
-	if (recNetStatsFile[client][slot] != null)
-	{
-		delete recNetStatsFile[client][slot];
-	}
-	recTickCount[client][slot] = 0;
-	recNetStatsCount[client][slot] = 0;
+	recRecordCount[client][slot] = 0;
 }
 
-// Open both files of a slot in "wb+" so we keep read access for the Save-side rewind.
+// Open in "wb+" so we keep read access for the Save-side rewind.
 static void RecTruncateSlot(int client, int slot)
 {
 	char path[PLATFORM_MAX_PATH];
 
-	if (recTicksFile[client][slot] != null)
+	if (recSlotFile[client][slot] != null)
 	{
-		delete recTicksFile[client][slot];
+		delete recSlotFile[client][slot];
 	}
-	RecBuildPath(client, slot, false, path, sizeof(path));
-	recTicksFile[client][slot] = OpenFile(path, "wb+");
-	if (recTicksFile[client][slot] == null)
+	RecBuildPath(client, slot, path, sizeof(path));
+	recSlotFile[client][slot] = OpenFile(path, "wb+");
+	if (recSlotFile[client][slot] == null)
 	{
-		LogError("Failed to open tick temp file '%s'", path);
+		LogError("Failed to open slot temp file '%s'", path);
 	}
-	recTickCount[client][slot] = 0;
-
-	if (recNetStatsFile[client][slot] != null)
-	{
-		delete recNetStatsFile[client][slot];
-	}
-	RecBuildPath(client, slot, true, path, sizeof(path));
-	recNetStatsFile[client][slot] = OpenFile(path, "wb+");
-	if (recNetStatsFile[client][slot] == null)
-	{
-		LogError("Failed to open netstats temp file '%s'", path);
-	}
-	recNetStatsCount[client][slot] = 0;
+	recRecordCount[client][slot] = 0;
 }
 
-static void RecAppendTick(int client, int slot, ReplayTickData tickData)
+static void RecAppendRecord(int client, int slot, ReplayTickData tickData, ReplayNetStats netStats)
 {
-	File f = recTicksFile[client][slot];
+	File f = recSlotFile[client][slot];
 	if (f == null)
 	{
 		return;
 	}
 	f.Write(tickData, RP_V2_TICK_DATA_BLOCKSIZE, 4);
-	recTickCount[client][slot]++;
-}
-
-static void RecAppendNetStats(int client, int slot, ReplayNetStats netStats)
-{
-	File f = recNetStatsFile[client][slot];
-	if (f == null)
-	{
-		return;
-	}
 	f.Write(netStats, sizeof(ReplayNetStats), 4);
-	recNetStatsCount[client][slot]++;
+	recRecordCount[client][slot]++;
 }
 
 

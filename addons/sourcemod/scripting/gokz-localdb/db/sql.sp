@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS Players ( \
     Alias TEXT, \
     Country TEXT, \
     IP TEXT, \
+    IsVIP INTEGER NOT NULL, \
     Cheater INTEGER NOT NULL DEFAULT '0', \
     LastPlayed TIMESTAMP NULL DEFAULT NULL, \
     Created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
@@ -23,26 +24,27 @@ CREATE TABLE IF NOT EXISTS Players ( \
     Alias VARCHAR(32), \
     Country VARCHAR(45), \
     IP VARCHAR(15), \
+    IsVIP TINYINT UNSIGNED NOT NULL, \
     Cheater TINYINT UNSIGNED NOT NULL DEFAULT '0', \
     LastPlayed TIMESTAMP NULL DEFAULT NULL, \
     Created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
     CONSTRAINT PK_Player PRIMARY KEY (SteamID32))";
 
 char sqlite_players_insert[] = "\
-INSERT OR IGNORE INTO Players (Alias, Country, IP, SteamID32, LastPlayed) \
-    VALUES ('%s', '%s', '%s', %d, CURRENT_TIMESTAMP)";
+INSERT OR IGNORE INTO Players (Alias, Country, IP, IsVIP, SteamID32, LastPlayed) \
+    VALUES ('%s', '%s', '%s', %d, %d, CURRENT_TIMESTAMP)";
 
 char sqlite_players_update[] = "\
 UPDATE OR IGNORE Players \
-    SET Alias='%s', Country='%s', IP='%s', LastPlayed=CURRENT_TIMESTAMP \
+    SET Alias='%s', Country='%s', IP='%s', IsVIP=%d, LastPlayed=CURRENT_TIMESTAMP \
     WHERE SteamID32=%d";
 
 char mysql_players_upsert[] = "\
-INSERT INTO Players (Alias, Country, IP, SteamID32, LastPlayed) \
-    VALUES ('%s', '%s', '%s', %d, CURRENT_TIMESTAMP) \
+INSERT INTO Players (Alias, Country, IP, IsVIP, SteamID32, LastPlayed) \
+    VALUES ('%s', '%s', '%s', %d, %d, CURRENT_TIMESTAMP) \
     ON DUPLICATE KEY UPDATE \
     SteamID32=VALUES(SteamID32), Alias=VALUES(Alias), Country=VALUES(Country), \
-    IP=VALUES(IP), LastPlayed=VALUES(LastPlayed)";
+    IP=VALUES(IP), IsVIP=VALUES(IsVIP), LastPlayed=VALUES(LastPlayed)";
 
 char sql_players_get_cheater[] = "\
 SELECT Cheater \

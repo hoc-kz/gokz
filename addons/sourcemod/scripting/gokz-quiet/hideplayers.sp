@@ -2,6 +2,10 @@
 	Hide sounds and effects from other players.
 */
 
+// Cache these to avoid calling unnecessary natives in OnSetTransmitClient which is log(n^2).
+static bool showPlayers[MAXPLAYERS + 1];
+static float clientAbsOrigin[MAXPLAYERS + 1];
+
 void OnPluginStart_HidePlayers()
 {
 	AddNormalSoundHook(Hook_NormalSound);
@@ -19,6 +23,19 @@ void OnPluginStart_HidePlayers()
 	}
 }
 
+void OnClientConnected_HidePlayers(int client)
+{
+	showPlayers[client] = false;
+}
+
+void OnOptionChanged_HidePlayers(int client, QTOption option, any newValue)
+{
+	if (option == QTOption_ShowPlayers)
+	{
+		showPlayers[client] = newValue;
+	}
+}
+
 void OnJoinTeam_HidePlayers(int client, int team)
 {
 	// Make sure client is only ever hooked once
@@ -28,6 +45,11 @@ void OnJoinTeam_HidePlayers(int client, int team)
 	{
 		SDKHook(client, SDKHook_SetTransmit, OnSetTransmitClient);
 	}
+}
+
+void OnPlayerRunCmdPost_HidePlayers(int client)
+{
+	GetClientAbsOrigin(client, clientAbsOrigin[client]);
 }
 
 Action CommandToggleShowPlayers(int client, int args)
@@ -48,13 +70,43 @@ Action CommandToggleShowPlayers(int client, int args)
 // Hide most of the other players' actions. This function is expensive.
 static Action OnSetTransmitClient(int entity, int client)
 {
-	if (GOKZ_GetOption(client, gC_QTOptionNames[QTOption_ShowPlayers]) == ShowPlayers_Disabled
-		 && entity != client
-		 && entity != GetObserverTarget(client))
+	if (entity == client)
+	{
+		return Plugin_Continue;
+	}
+
+	if (!showPlayers[client])
 	{
 		return Plugin_Handled;
 	}
-	return Plugin_Continue;
+	else
+	{
+		// Inline to not call natives
+		float dx = clientAbsOrigin[entity][0] - clientAbsOrigin[client][0];
+		float dy = clientAbsOrigin[entity][1] - clientAbsOrigin[client][1];
+		float dz = clientAbsOrigin[entity][2] - clientAbsOrigin[client][2];
+		float distanceSquared = dx*dx + dy*dy + dz*dz;
+
+		int alpha;
+		if (distanceSquared <= 150.0*150.0)
+		{
+			alpha = 0;
+		}
+		else if (distanceSquared >= 250.0*250.0)
+		{
+			alpha = 255;
+		}
+		else
+		{
+			float t = (distanceSquared - 150.0*150.0) / (250.0*250.0 - 150.0*150.0);
+			alpha = 255 * t;
+		}
+
+		SetEntityRenderMode(entity, RENDER_TRANSCOLOR);
+		SetEntityRenderColor(entity, _, _, _, alpha);
+
+		return Plugin_Continue;
+	}
 }
 
 // Hide reload sounds. Required if other players were visible at one point during the gameplay.

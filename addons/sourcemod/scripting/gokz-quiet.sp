@@ -70,6 +70,11 @@ public void OnAllPluginsLoaded()
 
 // =====[ CLIENT EVENTS ]=====
 
+public void OnClientConnected(int client)
+{
+	OnClientConnected_HidePlayers(client);
+}
+
 public void GOKZ_OnJoinTeam(int client, int team)
 {
 	OnJoinTeam_HidePlayers(client, team);
@@ -83,6 +88,7 @@ public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float
 	}
 	
 	OnPlayerRunCmdPost_Soundscape(client);
+	OnPlayerRunCmdPost_HidePlayers(client);
 }
 
 
@@ -100,6 +106,7 @@ public void GOKZ_OnOptionChanged(int client, const char[] option, any newValue)
 	if (GOKZ_QT_IsQTOption(option, qtOption))
 	{
 		OnOptionChanged_Options(client, qtOption, newValue);
+		OnOptionChanged_HidePlayers(client, qtOption, newValue);
 	}
 }
 
